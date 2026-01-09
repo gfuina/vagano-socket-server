@@ -109,3 +109,4 @@ const socketInstance = io(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhos
 });
 ```
 
+# vagano-socket-server
