@@ -14,6 +14,16 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
+// Import location chat notification service
+let scheduleLocationChatNotification;
+try {
+  const locationChatNotifications = require('../lib/notifications/location-chat-notifications');
+  scheduleLocationChatNotification = locationChatNotifications.scheduleLocationChatNotification;
+} catch (error) {
+  console.warn('⚠️ Could not load location chat notifications:', error.message);
+  scheduleLocationChatNotification = null;
+}
+
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -335,8 +345,34 @@ io.on('connection', (socket) => {
     io.to(room).emit('location-message', data.message);
     console.log(`✅ [send-location-message] Broadcast complete to room ${room}`);
     
-    // NOTE: Notification scheduling is handled by the Next.js app via API webhooks
-    // This standalone server doesn't have access to the notification service
+    // Schedule notifications for users in the room (except sender)
+    if (scheduleLocationChatNotification && data.message.sender) {
+      const roomUsers = locationRoomUsers.get(room);
+      if (roomUsers) {
+        const senderId = typeof data.message.sender === 'object' 
+          ? data.message.sender._id 
+          : data.message.sender;
+        const senderName = typeof data.message.sender === 'object'
+          ? data.message.sender.name
+          : 'Unknown';
+        
+        // Schedule notification for each user in the room (except sender)
+        for (const [userId, userInfo] of roomUsers.entries()) {
+          if (userId !== senderId) {
+            try {
+              await scheduleLocationChatNotification(
+                userId,
+                countryCode,
+                senderName,
+                data.message.content
+              );
+            } catch (error) {
+              console.error(`❌ Error scheduling notification for user ${userId}:`, error);
+            }
+          }
+        }
+      }
+    }
   });
 
   socket.on('location-chat-typing', (data) => {
@@ -467,7 +503,6 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 WebSocket endpoint: ws://0.0.0.0:${PORT}/socket.io`);
   console.log(`❤️  Health check: http://0.0.0.0:${PORT}/health`);
   console.log(`📊 Stats: http://0.0.0.0:${PORT}/stats`);
-  console.log(`🔍 Debug: http://0.0.0.0:${PORT}/debug/rooms`);
 });
 
 // 🛡️ GRACEFUL SHUTDOWN
@@ -478,3 +513,4 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
+
