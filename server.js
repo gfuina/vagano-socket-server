@@ -54,6 +54,8 @@ app.use(cors({
   methods: ['GET', 'POST', 'OPTIONS'],
 }));
 
+app.use(express.json());
+
 // ⚡️ Socket.IO Configuration
 const io = new Server(httpServer, {
   cors: {
@@ -194,8 +196,12 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('message-likes-updated', (data) => {
+    if (!data?.conversationId) return;
+    io.to(`conversation:${data.conversationId}`).emit('message-likes-updated', data);
+  });
+
   socket.on('send-message', (data) => {
-    // Clear typing indicator when message is sent
     if (userId) {
       clearTypingTimeout(data.conversationId, userId);
       io.to(`conversation:${data.conversationId}`).emit('userStopTyping', { 
@@ -204,25 +210,20 @@ io.on('connection', (socket) => {
       });
     }
     
-    // Emit to conversation-specific room (works for both 1-to-1 and group)
+    // Emit to conversation room (all clients that joined this conversation)
     io.to(`conversation:${data.conversationId}`).emit(`message:${data.conversationId}`, data.message);
     
-    // Also emit global events for unread count updates
-    io.emit('newMessage', data);
-    
-    // For 1-to-1: emit to recipient's user room
+    // Targeted newMessage to participants only (not broadcast to ALL clients)
     if (data.recipientId) {
-      io.to(`user:${data.recipientId}`).emit(`message:user:${data.recipientId}`, data);
-    }
-    
-    // 🆕 For group conversations: emit to all participants
-    if (data.isGroupConversation && data.participantIds && Array.isArray(data.participantIds)) {
-      console.log(`📨 [send-message] Group message - notifying ${data.participantIds.length} participants`);
-      data.participantIds.forEach(participantId => {
-        if (participantId !== userId) { // Don't notify sender
-          io.to(`user:${participantId}`).emit(`message:user:${participantId}`, data);
-        }
+      // 1-to-1: notify recipient + sender
+      io.to(`user:${data.recipientId}`).emit('newMessage', data);
+      if (userId) io.to(`user:${userId}`).emit('newMessage', data);
+    } else if (data.isGroupConversation && Array.isArray(data.participantIds)) {
+      // Group: notify all participants
+      data.participantIds.forEach(pid => {
+        io.to(`user:${pid}`).emit('newMessage', data);
       });
+      if (userId) io.to(`user:${userId}`).emit('newMessage', data);
     }
   });
 
@@ -420,6 +421,43 @@ io.on('connection', (socket) => {
       socketLocationRooms.delete(socket.id);
     }
   });
+});
+
+// ⚡️ DIRECT EMIT ENDPOINT — bypasses socket.io client relay for lower latency
+app.post('/api/emit', (req, res) => {
+  try {
+    const { event, data } = req.body;
+    if (!event || !data) {
+      return res.status(400).json({ error: 'event and data required' });
+    }
+
+    if (event === 'send-message') {
+      if (data.conversationId && data.message) {
+        io.to(`conversation:${data.conversationId}`).emit(`message:${data.conversationId}`, data.message);
+
+        const senderId = typeof data.message?.sender === 'string'
+          ? data.message.sender
+          : data.message?.sender?._id?.toString();
+
+        if (data.recipientId) {
+          io.to(`user:${data.recipientId}`).emit('newMessage', data);
+          if (senderId) io.to(`user:${senderId}`).emit('newMessage', data);
+        } else if (data.isGroupConversation && Array.isArray(data.participantIds)) {
+          data.participantIds.forEach(pid => {
+            io.to(`user:${pid}`).emit('newMessage', data);
+          });
+          if (senderId) io.to(`user:${senderId}`).emit('newMessage', data);
+        }
+      }
+    } else {
+      io.emit(event, data);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[/api/emit] Error:', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
 });
 
 // ❤️ HEALTH CHECK ENDPOINT
