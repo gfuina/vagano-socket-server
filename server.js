@@ -99,8 +99,17 @@ const clearTypingTimeout = (conversationId, userId) => {
   }
 };
 
+// Helper to build location chat room name
+const buildLocationChatRoom = (countryCode, regionCode) => {
+  const normalizedCountry = String(countryCode).toUpperCase();
+  if (regionCode) {
+    return `location-chat:${normalizedCountry}:${String(regionCode).toUpperCase()}`;
+  }
+  return `location-chat:${normalizedCountry}`;
+};
+
 // Helper function to broadcast location room presence
-const broadcastLocationRoomPresence = (room, countryCode) => {
+const broadcastLocationRoomPresence = (room, countryCode, regionCode) => {
   const roomUsers = locationRoomUsers.get(room);
   const users = roomUsers ? Array.from(roomUsers.entries()).map(([id, data]) => ({
     id,
@@ -109,6 +118,7 @@ const broadcastLocationRoomPresence = (room, countryCode) => {
   
   io.to(room).emit('location-room-presence', {
     countryCode,
+    regionCode: regionCode || null,
     onlineCount: users.length,
     users
   });
@@ -269,47 +279,41 @@ io.on('connection', (socket) => {
   });
 
   // 🌍 LOCATION CHAT EVENTS
-  socket.on('join-location-chat', ({ countryCode, userId, userName }) => {
+  socket.on('join-location-chat', ({ countryCode, regionCode, userId, userName }) => {
     if (!countryCode) return;
     const normalizedCode = countryCode.toUpperCase();
-    const room = `location-chat:${normalizedCode}`;
+    const normalizedRegion = regionCode ? String(regionCode).toUpperCase() : null;
+    const room = buildLocationChatRoom(normalizedCode, normalizedRegion);
     
-    // Join the socket room
     socket.join(room);
     
-    // Track user in room (use userName from event or fallback to 'Anonymous')
     const displayName = userName || 'Anonymous';
     addUserToLocationRoom(room, userId, socket.id, displayName);
     
     console.log(`🌍 User ${userId} (${displayName}) joined location chat room: ${room}`);
     console.log(`🌍 Socket ${socket.id} is now in rooms:`, Array.from(socket.rooms));
     
-    // Broadcast updated presence to all users in room
-    broadcastLocationRoomPresence(room, normalizedCode);
+    broadcastLocationRoomPresence(room, normalizedCode, normalizedRegion);
   });
 
-  socket.on('leave-location-chat', ({ countryCode, userId }) => {
+  socket.on('leave-location-chat', ({ countryCode, regionCode, userId }) => {
     if (!countryCode) return;
     const normalizedCode = countryCode.toUpperCase();
-    const room = `location-chat:${normalizedCode}`;
+    const normalizedRegion = regionCode ? String(regionCode).toUpperCase() : null;
+    const room = buildLocationChatRoom(normalizedCode, normalizedRegion);
     
-    // Leave the socket room
     socket.leave(room);
-    
-    // Remove user from tracking
     removeUserFromLocationRoom(room, userId, socket.id);
     
-    console.log(`👤 User ${userId} left location chat: ${countryCode}`);
-    
-    // Broadcast updated presence to remaining users in room
-    broadcastLocationRoomPresence(room, normalizedCode);
+    console.log(`👤 User ${userId} left location chat: ${room}`);
+    broadcastLocationRoomPresence(room, normalizedCode, normalizedRegion);
   });
 
-  // 🌍 Request current room presence
-  socket.on('get-location-room-users', ({ countryCode }) => {
+  socket.on('get-location-room-users', ({ countryCode, regionCode }) => {
     if (!countryCode) return;
     const normalizedCode = countryCode.toUpperCase();
-    const room = `location-chat:${normalizedCode}`;
+    const normalizedRegion = regionCode ? String(regionCode).toUpperCase() : null;
+    const room = buildLocationChatRoom(normalizedCode, normalizedRegion);
     
     const roomUsers = locationRoomUsers.get(room);
     const users = roomUsers ? Array.from(roomUsers.entries()).map(([id, data]) => ({
@@ -319,6 +323,7 @@ io.on('connection', (socket) => {
     
     socket.emit('location-room-presence', {
       countryCode: normalizedCode,
+      regionCode: normalizedRegion,
       onlineCount: users.length,
       users
     });
@@ -333,39 +338,48 @@ io.on('connection', (socket) => {
       return;
     }
     
-    const room = `location-chat:${data.countryCode.toUpperCase()}`;
-    const countryCode = data.countryCode.toUpperCase();
+    const normalizedCode = data.countryCode.toUpperCase();
+    const normalizedRegion = data.regionCode
+      ? String(data.regionCode).toUpperCase()
+      : data.message.regionCode
+        ? String(data.message.regionCode).toUpperCase()
+        : null;
+    const room = buildLocationChatRoom(normalizedCode, normalizedRegion);
     
     console.log(`📨 [send-location-message] Broadcasting to room ${room}:`, {
       messageId: data.message._id,
       messageCountryCode: data.message.countryCode,
+      messageRegionCode: data.message.regionCode,
       sender: data.message.sender?.name || data.message.sender,
       socketId: socket.id
     });
     
     io.to(room).emit('location-message', data.message);
     console.log(`✅ [send-location-message] Broadcast complete to room ${room}`);
-    
-    // NOTE: Notification scheduling is handled by the Next.js app via API webhooks
-    // This standalone server doesn't have access to the notification service
   });
 
   socket.on('location-chat-typing', (data) => {
     if (!data.countryCode || !data.userId) return;
-    const room = `location-chat:${data.countryCode.toUpperCase()}`;
+    const normalizedCode = data.countryCode.toUpperCase();
+    const normalizedRegion = data.regionCode ? String(data.regionCode).toUpperCase() : null;
+    const room = buildLocationChatRoom(normalizedCode, normalizedRegion);
     socket.to(room).emit('location-user-typing', {
       userId: data.userId,
       userName: data.userName,
-      countryCode: data.countryCode,
+      countryCode: normalizedCode,
+      regionCode: normalizedRegion,
     });
   });
 
   socket.on('location-chat-stop-typing', (data) => {
     if (!data.countryCode || !data.userId) return;
-    const room = `location-chat:${data.countryCode.toUpperCase()}`;
+    const normalizedCode = data.countryCode.toUpperCase();
+    const normalizedRegion = data.regionCode ? String(data.regionCode).toUpperCase() : null;
+    const room = buildLocationChatRoom(normalizedCode, normalizedRegion);
     socket.to(room).emit('location-user-stop-typing', {
       userId: data.userId,
-      countryCode: data.countryCode,
+      countryCode: normalizedCode,
+      regionCode: normalizedRegion,
     });
   });
 
@@ -412,9 +426,10 @@ io.on('connection', (socket) => {
           if (roomUsers.size === 0) {
             locationRoomUsers.delete(room);
           } else {
-            // Broadcast updated presence to remaining users
-            const countryCode = room.replace('location-chat:', '');
-            broadcastLocationRoomPresence(room, countryCode);
+            const roomParts = room.replace('location-chat:', '').split(':');
+            const countryCode = roomParts[0];
+            const regionCode = roomParts[1] || null;
+            broadcastLocationRoomPresence(room, countryCode, regionCode);
           }
         }
       }
@@ -447,6 +462,15 @@ app.post('/api/emit', (req, res) => {
             io.to(`user:${pid}`).emit('newMessage', data);
           });
           if (senderId) io.to(`user:${senderId}`).emit('newMessage', data);
+        }
+      }
+    } else if (event === 'message-deleted') {
+      if (data.conversationId && data.messageId) {
+        io.to(`conversation:${data.conversationId}`).emit('message-deleted', data);
+        if (Array.isArray(data.participantIds)) {
+          data.participantIds.forEach(pid => {
+            io.to(`user:${pid}`).emit('message-deleted', data);
+          });
         }
       }
     } else {
