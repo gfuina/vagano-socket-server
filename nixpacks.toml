@@ -1,6 +1,11 @@
 # Nixpacks configuration for Railway
+# Do not set nixPkgs manually — let the Node provider resolve nodejs_22 from the archive.
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+
 [phases.setup]
-nixPkgs = ["nodejs-22_x"]
+nixpkgsArchive = "51ad838b03a05b1de6f9f2a0fffecee64a9788ee"
 
 [phases.install]
 cmds = ["npm ci"]
@@ -10,4 +15,3 @@ cmds = []
 
 [start]
 cmd = "npm start"
-
