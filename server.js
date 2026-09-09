@@ -473,6 +473,15 @@ app.post('/api/emit', (req, res) => {
           });
         }
       }
+    } else if (
+      event === 'message-updated' ||
+      event === 'message-likes-updated' ||
+      event === 'photoRevealed'
+    ) {
+      // Événements scoped à une conversation : émettre à la room uniquement
+      if (data.conversationId) {
+        io.to(`conversation:${data.conversationId}`).emit(event, data);
+      }
     } else {
       io.emit(event, data);
     }
