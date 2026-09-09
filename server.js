@@ -26,30 +26,13 @@ const locationRoomUsers = new Map();
 // Track which location rooms a socket is in (socketId -> Set<roomName>)
 const socketLocationRooms = new Map();
 
-// ⚡️ CORS Configuration - Allow your Next.js app
-const ALLOWED_ORIGINS = [
-  'https://app.vagano.fr',
-  'https://www.vagano.fr',
-  'http://localhost:3000',
-  'http://localhost:3001',
-];
-
-// Add environment variable for additional origins
-if (process.env.ALLOWED_ORIGINS) {
-  ALLOWED_ORIGINS.push(...process.env.ALLOWED_ORIGINS.split(','));
-}
-
+// ⚠️ Les clients React Native envoient l'URL du bundle JS comme Origin
+// (ex: http://192.168.x.x:8081 en dev Metro, file:// en release) — une
+// whitelist stricte les bloque. CORS n'apporte aucune sécurité ici (l'auth
+// est par userId, et un client non-navigateur peut forger l'Origin) : on
+// reflète donc toutes les origins.
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin) return callback(null, true);
-    
-    if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vagano.fr')) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: (origin, callback) => callback(null, true),
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
 }));
@@ -59,14 +42,9 @@ app.use(express.json());
 // ⚡️ Socket.IO Configuration
 const io = new Server(httpServer, {
   cors: {
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (ALLOWED_ORIGINS.includes(origin) || origin?.endsWith('.vagano.fr')) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
+    // Voir commentaire CORS express ci-dessus : les apps natives envoient des
+    // origins imprévisibles (bundle Metro/file://), on accepte tout.
+    origin: (origin, callback) => callback(null, true),
     methods: ['GET', 'POST'],
     credentials: true,
   },
