@@ -456,9 +456,15 @@ app.post('/api/emit', (req, res) => {
       event === 'message-likes-updated' ||
       event === 'photoRevealed'
     ) {
-      // Événements scoped à une conversation : émettre à la room uniquement
+      // Événements scoped à une conversation : émettre à la room uniquement.
+      // message-likes-updated peut aussi porter `reactions`.
       if (data.conversationId) {
         io.to(`conversation:${data.conversationId}`).emit(event, data);
+      }
+    } else if (event === 'location-reactions-updated') {
+      const room = data.room || buildLocationChatRoom(data.countryCode, data.regionCode);
+      if (room && String(room).startsWith('location-chat:')) {
+        io.to(room).emit('location-reactions-updated', data);
       }
     } else {
       io.emit(event, data);
