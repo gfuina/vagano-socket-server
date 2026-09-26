@@ -461,10 +461,14 @@ app.post('/api/emit', (req, res) => {
       if (data.conversationId) {
         io.to(`conversation:${data.conversationId}`).emit(event, data);
       }
-    } else if (event === 'location-reactions-updated') {
+    } else if (
+      event === 'location-reactions-updated' ||
+      event === 'location-message-updated' ||
+      event === 'location-message-deleted'
+    ) {
       const room = data.room || buildLocationChatRoom(data.countryCode, data.regionCode);
       if (room && String(room).startsWith('location-chat:')) {
-        io.to(room).emit('location-reactions-updated', data);
+        io.to(room).emit(event, data);
       }
     } else {
       io.emit(event, data);
