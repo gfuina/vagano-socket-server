@@ -25,6 +25,12 @@ const typingUsers = new Map();
 const locationRoomUsers = new Map();
 // Track which location rooms a socket is in (socketId -> Set<roomName>)
 const socketLocationRooms = new Map();
+// 🎙️ Voice channel presence (LiveKit room name `voice:CC[:RR]` -> Map<userId, { socketId, userName, image }>)
+// Mirrors LiveKit participants so the inbox can show "N en vocal" without
+// polling LiveKit. Source of truth for who's actually speaking stays LiveKit.
+const voiceRoomUsers = new Map();
+// socketId -> Set<voiceRoom>
+const socketVoiceRooms = new Map();
 
 // ⚠️ Les clients React Native envoient l'URL du bundle JS comme Origin
 // (ex: http://192.168.x.x:8081 en dev Metro, file:// en release) — une
@@ -136,6 +142,80 @@ const removeUserFromLocationRoom = (room, userId, socketId) => {
       socketLocationRooms.delete(socketId);
     }
   }
+};
+
+// 🎙️ Voice channel helpers
+const buildVoiceRoom = (countryCode, regionCode) => {
+  const normalizedCountry = String(countryCode).toUpperCase();
+  if (regionCode) {
+    return `voice:${normalizedCountry}:${String(regionCode).toUpperCase()}`;
+  }
+  return `voice:${normalizedCountry}`;
+};
+
+const buildVoicePresencePayload = (voiceRoom, countryCode, regionCode) => {
+  const roomUsers = voiceRoomUsers.get(voiceRoom);
+  const users = roomUsers
+    ? Array.from(roomUsers.entries()).map(([id, data]) => ({
+        userId: id,
+        userName: data.userName,
+        image: data.image || null,
+      }))
+    : [];
+  return {
+    key: regionCode ? `${countryCode}:${regionCode}` : countryCode,
+    countryCode,
+    regionCode: regionCode || null,
+    room: voiceRoom,
+    count: users.length,
+    users,
+  };
+};
+
+// Broadcast to the matching text channel room (inbox rows + chat header listen
+// there) and to the voice room itself.
+const broadcastVoicePresence = (voiceRoom, countryCode, regionCode) => {
+  const payload = buildVoicePresencePayload(voiceRoom, countryCode, regionCode);
+  const textRoom = buildLocationChatRoom(countryCode, regionCode);
+  io.to(textRoom).to(voiceRoom).emit('voice-room-users', payload);
+  console.log(`🎙️ [Voice] Room ${voiceRoom}: ${payload.count} users`);
+};
+
+const addUserToVoiceRoom = (voiceRoom, userId, socketId, userName, image) => {
+  if (!voiceRoomUsers.has(voiceRoom)) {
+    voiceRoomUsers.set(voiceRoom, new Map());
+  }
+  voiceRoomUsers.get(voiceRoom).set(userId, { socketId, userName, image });
+  if (!socketVoiceRooms.has(socketId)) {
+    socketVoiceRooms.set(socketId, new Set());
+  }
+  socketVoiceRooms.get(socketId).add(voiceRoom);
+};
+
+const removeUserFromVoiceRoom = (voiceRoom, userId, socketId) => {
+  const roomUsers = voiceRoomUsers.get(voiceRoom);
+  if (roomUsers) {
+    // Only drop if this socket owns the entry (same user on 2 devices).
+    const entry = roomUsers.get(userId);
+    if (!entry || entry.socketId === socketId) {
+      roomUsers.delete(userId);
+    }
+    if (roomUsers.size === 0) {
+      voiceRoomUsers.delete(voiceRoom);
+    }
+  }
+  const socketRooms = socketVoiceRooms.get(socketId);
+  if (socketRooms) {
+    socketRooms.delete(voiceRoom);
+    if (socketRooms.size === 0) {
+      socketVoiceRooms.delete(socketId);
+    }
+  }
+};
+
+const parseVoiceRoom = (voiceRoom) => {
+  const parts = voiceRoom.replace('voice:', '').split(':');
+  return { countryCode: parts[0], regionCode: parts[1] || null };
 };
 
 // ⚡️ SOCKET.IO EVENT HANDLERS
@@ -361,9 +441,79 @@ io.on('connection', (socket) => {
     });
   });
 
+  // 🎙️ VOICE CHANNEL PRESENCE
+  socket.on('join-voice-channel', ({ countryCode, regionCode, userId: uid, userName, image }) => {
+    const voiceUserId = uid || userId;
+    if (!countryCode || !voiceUserId) return;
+    const normalizedCode = String(countryCode).toUpperCase();
+    const normalizedRegion = regionCode ? String(regionCode).toUpperCase() : null;
+    const voiceRoom = buildVoiceRoom(normalizedCode, normalizedRegion);
+
+    // One voice room per socket — leaving the previous one keeps counts honest
+    // when the client hops channels without emitting leave first.
+    const previous = socketVoiceRooms.get(socket.id);
+    if (previous) {
+      for (const prevRoom of Array.from(previous)) {
+        if (prevRoom === voiceRoom) continue;
+        socket.leave(prevRoom);
+        removeUserFromVoiceRoom(prevRoom, voiceUserId, socket.id);
+        const parsed = parseVoiceRoom(prevRoom);
+        broadcastVoicePresence(prevRoom, parsed.countryCode, parsed.regionCode);
+      }
+    }
+
+    socket.join(voiceRoom);
+    addUserToVoiceRoom(voiceRoom, voiceUserId, socket.id, userName || 'Anonymous', image);
+    console.log(`🎙️ User ${voiceUserId} joined voice room: ${voiceRoom}`);
+    broadcastVoicePresence(voiceRoom, normalizedCode, normalizedRegion);
+  });
+
+  socket.on('leave-voice-channel', ({ countryCode, regionCode, userId: uid }) => {
+    const voiceUserId = uid || userId;
+    if (!countryCode || !voiceUserId) return;
+    const normalizedCode = String(countryCode).toUpperCase();
+    const normalizedRegion = regionCode ? String(regionCode).toUpperCase() : null;
+    const voiceRoom = buildVoiceRoom(normalizedCode, normalizedRegion);
+
+    socket.leave(voiceRoom);
+    removeUserFromVoiceRoom(voiceRoom, voiceUserId, socket.id);
+    console.log(`🎙️ User ${voiceUserId} left voice room: ${voiceRoom}`);
+    broadcastVoicePresence(voiceRoom, normalizedCode, normalizedRegion);
+  });
+
+  // Snapshot for one channel, or for several at once (inbox rows).
+  socket.on('get-voice-room-users', (payload) => {
+    const channels = Array.isArray(payload?.channels)
+      ? payload.channels
+      : payload?.countryCode
+        ? [payload]
+        : [];
+    for (const ch of channels) {
+      if (!ch?.countryCode) continue;
+      const normalizedCode = String(ch.countryCode).toUpperCase();
+      const normalizedRegion = ch.regionCode ? String(ch.regionCode).toUpperCase() : null;
+      const voiceRoom = buildVoiceRoom(normalizedCode, normalizedRegion);
+      socket.emit(
+        'voice-room-users',
+        buildVoicePresencePayload(voiceRoom, normalizedCode, normalizedRegion)
+      );
+    }
+  });
+
   // 🔌 DISCONNECT
   socket.on('disconnect', () => {
     console.log('❌ Client disconnected:', socket.id);
+
+    // 🎙️ Clean up voice presence (app killed mid-call)
+    const voiceRooms = socketVoiceRooms.get(socket.id);
+    if (voiceRooms && userId) {
+      for (const voiceRoom of Array.from(voiceRooms)) {
+        removeUserFromVoiceRoom(voiceRoom, userId, socket.id);
+        const parsed = parseVoiceRoom(voiceRoom);
+        broadcastVoicePresence(voiceRoom, parsed.countryCode, parsed.regionCode);
+      }
+      socketVoiceRooms.delete(socket.id);
+    }
     
     // Remove user from online tracking
     if (userId) {
@@ -499,6 +649,7 @@ app.get('/stats', (req, res) => {
     onlineUsers: onlineUsers.size,
     typingUsers: typingUsers.size,
     locationChatRooms: locationRoomUsers.size,
+    voiceRooms: voiceRoomUsers.size,
     uptime: process.uptime(),
   });
 });
@@ -513,7 +664,7 @@ app.get('/debug/rooms', (req, res) => {
   
   adapterRooms.forEach((sockets, roomName) => {
     // Skip socket ID rooms (each socket has a room with its own ID)
-    if (!roomName.startsWith('location-chat:') && !roomName.startsWith('conversation:') && !roomName.startsWith('user:')) {
+    if (!roomName.startsWith('location-chat:') && !roomName.startsWith('voice:') && !roomName.startsWith('conversation:') && !roomName.startsWith('user:')) {
       return;
     }
     rooms[roomName] = {
