@@ -31,6 +31,11 @@ const socketLocationRooms = new Map();
 const voiceRoomUsers = new Map();
 // socketId -> Set<voiceRoom>
 const socketVoiceRooms = new Map();
+// 🏷️ Interest channel presence (`interest:{slug}` -> Map<userId, Set<socketId>>)
+// The API reads it to skip pushes for users already looking at the channel.
+const interestRoomUsers = new Map();
+// socketId -> Set<interestRoom>
+const socketInterestRooms = new Map();
 
 // ⚠️ Les clients React Native envoient l'URL du bundle JS comme Origin
 // (ex: http://192.168.x.x:8081 en dev Metro, file:// en release) — une
@@ -216,6 +221,47 @@ const removeUserFromVoiceRoom = (voiceRoom, userId, socketId) => {
 const parseVoiceRoom = (voiceRoom) => {
   const parts = voiceRoom.replace('voice:', '').split(':');
   return { countryCode: parts[0], regionCode: parts[1] || null };
+};
+
+// 🏷️ Interest channel helpers
+const normalizeInterestSlug = (slug) => {
+  const s = String(slug || '').trim().toLowerCase();
+  return /^[a-z0-9-]{1,48}$/.test(s) ? s : null;
+};
+
+const buildInterestRoom = (slug) => `interest:${slug}`;
+
+const broadcastInterestPresence = (slug) => {
+  const room = buildInterestRoom(slug);
+  const users = interestRoomUsers.get(room);
+  io.to(room).emit('interest-room-presence', {
+    slug,
+    onlineCount: users ? users.size : 0,
+  });
+};
+
+const addUserToInterestRoom = (room, userId, socketId) => {
+  if (!interestRoomUsers.has(room)) interestRoomUsers.set(room, new Map());
+  const users = interestRoomUsers.get(room);
+  if (!users.has(userId)) users.set(userId, new Set());
+  users.get(userId).add(socketId);
+  if (!socketInterestRooms.has(socketId)) socketInterestRooms.set(socketId, new Set());
+  socketInterestRooms.get(socketId).add(room);
+};
+
+const removeUserFromInterestRoom = (room, userId, socketId) => {
+  const users = interestRoomUsers.get(room);
+  if (users && users.has(userId)) {
+    const sockets = users.get(userId);
+    sockets.delete(socketId);
+    if (sockets.size === 0) users.delete(userId);
+    if (users.size === 0) interestRoomUsers.delete(room);
+  }
+  const rooms = socketInterestRooms.get(socketId);
+  if (rooms) {
+    rooms.delete(room);
+    if (rooms.size === 0) socketInterestRooms.delete(socketId);
+  }
 };
 
 // ⚡️ SOCKET.IO EVENT HANDLERS
@@ -441,6 +487,48 @@ io.on('connection', (socket) => {
     });
   });
 
+  // 🏷️ INTEREST CHANNEL EVENTS (messages are emitted by the API via /api/emit)
+  socket.on('join-interest-channel', ({ slug } = {}) => {
+    const s = normalizeInterestSlug(slug);
+    if (!s || !userId) return;
+    const room = buildInterestRoom(s);
+    socket.join(room);
+    addUserToInterestRoom(room, userId, socket.id);
+    broadcastInterestPresence(s);
+  });
+
+  socket.on('leave-interest-channel', ({ slug } = {}) => {
+    const s = normalizeInterestSlug(slug);
+    if (!s || !userId) return;
+    const room = buildInterestRoom(s);
+    socket.leave(room);
+    removeUserFromInterestRoom(room, userId, socket.id);
+    broadcastInterestPresence(s);
+  });
+
+  socket.on('get-interest-room-users', ({ slug } = {}) => {
+    const s = normalizeInterestSlug(slug);
+    if (!s) return;
+    const users = interestRoomUsers.get(buildInterestRoom(s));
+    socket.emit('interest-room-presence', { slug: s, onlineCount: users ? users.size : 0 });
+  });
+
+  socket.on('interest-typing', ({ slug, userName } = {}) => {
+    const s = normalizeInterestSlug(slug);
+    if (!s || !userId) return;
+    socket.to(buildInterestRoom(s)).emit('interest-user-typing', {
+      slug: s,
+      userId,
+      userName: userName || '…',
+    });
+  });
+
+  socket.on('interest-stop-typing', ({ slug } = {}) => {
+    const s = normalizeInterestSlug(slug);
+    if (!s || !userId) return;
+    socket.to(buildInterestRoom(s)).emit('interest-user-stop-typing', { slug: s, userId });
+  });
+
   // 🎙️ VOICE CHANNEL PRESENCE
   socket.on('join-voice-channel', ({ countryCode, regionCode, userId: uid, userName, image }) => {
     const voiceUserId = uid || userId;
@@ -563,6 +651,16 @@ io.on('connection', (socket) => {
       }
       socketLocationRooms.delete(socket.id);
     }
+
+    // 🏷️ Clean up interest channel presence
+    const interestRooms = socketInterestRooms.get(socket.id);
+    if (interestRooms && userId) {
+      for (const room of Array.from(interestRooms)) {
+        removeUserFromInterestRoom(room, userId, socket.id);
+        broadcastInterestPresence(room.replace('interest:', ''));
+      }
+      socketInterestRooms.delete(socket.id);
+    }
   });
 });
 
@@ -620,6 +718,14 @@ app.post('/api/emit', (req, res) => {
       if (room && String(room).startsWith('location-chat:')) {
         io.to(room).emit(event, data);
       }
+    } else if (
+      event === 'interest-message' ||
+      event === 'interest-message-updated' ||
+      event === 'interest-message-deleted' ||
+      event === 'interest-reactions-updated'
+    ) {
+      const slug = normalizeInterestSlug(data.slug);
+      if (slug) io.to(buildInterestRoom(slug)).emit(event, data);
     } else {
       io.emit(event, data);
     }
@@ -629,6 +735,14 @@ app.post('/api/emit', (req, res) => {
     console.error('[/api/emit] Error:', err);
     res.status(500).json({ error: 'Internal error' });
   }
+});
+
+// 🏷️ Who is currently in an interest channel room (API push suppression)
+app.get('/api/interest-presence', (req, res) => {
+  const slug = normalizeInterestSlug(req.query.slug);
+  if (!slug) return res.status(400).json({ error: 'slug required' });
+  const users = interestRoomUsers.get(buildInterestRoom(slug));
+  res.json({ slug, userIds: users ? Array.from(users.keys()) : [] });
 });
 
 // ❤️ HEALTH CHECK ENDPOINT
@@ -650,6 +764,7 @@ app.get('/stats', (req, res) => {
     typingUsers: typingUsers.size,
     locationChatRooms: locationRoomUsers.size,
     voiceRooms: voiceRoomUsers.size,
+    interestRooms: interestRoomUsers.size,
     uptime: process.uptime(),
   });
 });
@@ -664,7 +779,7 @@ app.get('/debug/rooms', (req, res) => {
   
   adapterRooms.forEach((sockets, roomName) => {
     // Skip socket ID rooms (each socket has a room with its own ID)
-    if (!roomName.startsWith('location-chat:') && !roomName.startsWith('voice:') && !roomName.startsWith('conversation:') && !roomName.startsWith('user:')) {
+    if (!roomName.startsWith('location-chat:') && !roomName.startsWith('voice:') && !roomName.startsWith('interest:') && !roomName.startsWith('conversation:') && !roomName.startsWith('user:')) {
       return;
     }
     rooms[roomName] = {
