@@ -231,6 +231,13 @@ const normalizeInterestSlug = (slug) => {
 
 const buildInterestRoom = (slug) => `interest:${slug}`;
 
+// 🏕️ Spot chat helpers (membership is checked by the API on read/write)
+const normalizeSpotId = (id) => {
+  const s = String(id || '').trim().toLowerCase();
+  return /^[a-f0-9]{24}$/.test(s) ? s : null;
+};
+const buildSpotChatRoom = (spotId) => `spot-chat:${spotId}`;
+
 const broadcastInterestPresence = (slug) => {
   const room = buildInterestRoom(slug);
   const users = interestRoomUsers.get(room);
@@ -487,6 +494,19 @@ io.on('connection', (socket) => {
     });
   });
 
+  // 🏕️ SPOT CHAT EVENTS (messages are emitted by the API via /api/emit)
+  socket.on('join-spot-chat', ({ spotId } = {}) => {
+    const id = normalizeSpotId(spotId);
+    if (!id || !userId) return;
+    socket.join(buildSpotChatRoom(id));
+  });
+
+  socket.on('leave-spot-chat', ({ spotId } = {}) => {
+    const id = normalizeSpotId(spotId);
+    if (!id) return;
+    socket.leave(buildSpotChatRoom(id));
+  });
+
   // 🏷️ INTEREST CHANNEL EVENTS (messages are emitted by the API via /api/emit)
   socket.on('join-interest-channel', ({ slug } = {}) => {
     const s = normalizeInterestSlug(slug);
@@ -726,6 +746,9 @@ app.post('/api/emit', (req, res) => {
     ) {
       const slug = normalizeInterestSlug(data.slug);
       if (slug) io.to(buildInterestRoom(slug)).emit(event, data);
+    } else if (event === 'spot-chat-message') {
+      const spotId = normalizeSpotId(data.spotId);
+      if (spotId) io.to(buildSpotChatRoom(spotId)).emit(event, data);
     } else {
       io.emit(event, data);
     }
