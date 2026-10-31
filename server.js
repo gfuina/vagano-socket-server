@@ -749,6 +749,28 @@ app.post('/api/emit', (req, res) => {
     } else if (event === 'spot-chat-message') {
       const spotId = normalizeSpotId(data.spotId);
       if (spotId) io.to(buildSpotChatRoom(spotId)).emit(event, data);
+    } else if (event === 'typing' || event === 'stopTyping') {
+      // Server-side typers (Vagabot): same room events as the socket handlers.
+      // AI replies take longer than a keystroke → 30s safety timeout instead of 3s.
+      if (data.conversationId && data.userId) {
+        const key = `${data.conversationId}:${data.userId}`;
+        const payload = {
+          conversationId: data.conversationId,
+          userId: data.userId,
+          userName: data.userName,
+        };
+        clearTypingTimeout(data.conversationId, data.userId);
+        if (event === 'typing') {
+          const timeout = setTimeout(() => {
+            typingUsers.delete(key);
+            io.to(`conversation:${data.conversationId}`).emit('userStopTyping', payload);
+          }, 30000);
+          typingUsers.set(key, { timeout, userName: data.userName });
+          io.to(`conversation:${data.conversationId}`).emit('userTyping', payload);
+        } else {
+          io.to(`conversation:${data.conversationId}`).emit('userStopTyping', payload);
+        }
+      }
     } else {
       io.emit(event, data);
     }
