@@ -745,7 +745,13 @@ app.post('/api/emit', (req, res) => {
       event === 'interest-reactions-updated'
     ) {
       const slug = normalizeInterestSlug(data.slug);
-      if (slug) io.to(buildInterestRoom(slug)).emit(event, data);
+      if (slug && Array.isArray(data.userIds)) {
+        // Approval-only channel: members' user rooms, never the open channel room.
+        const { userIds, ...payload } = data;
+        userIds.forEach((uid) => io.to(`user:${uid}`).emit(event, payload));
+      } else if (slug) {
+        io.to(buildInterestRoom(slug)).emit(event, data);
+      }
     } else if (event === 'spot-chat-message') {
       const spotId = normalizeSpotId(data.spotId);
       if (spotId) io.to(buildSpotChatRoom(spotId)).emit(event, data);
