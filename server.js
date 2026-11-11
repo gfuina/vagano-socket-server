@@ -722,7 +722,8 @@ app.post('/api/emit', (req, res) => {
     } else if (
       event === 'message-updated' ||
       event === 'message-likes-updated' ||
-      event === 'photoRevealed'
+      event === 'photoRevealed' ||
+      event === 'conversation-pin-updated'
     ) {
       // Événements scoped à une conversation : émettre à la room uniquement.
       // message-likes-updated peut aussi porter `reactions`.
